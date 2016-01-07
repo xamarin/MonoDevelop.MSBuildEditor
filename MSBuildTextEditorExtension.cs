@@ -177,7 +177,7 @@ namespace MonoDevelop.MSBuildEditor
 		//TODO: more robust queuing and rate limiting mechanism
 		void QueueInference ()
 		{
-			var doc = CU as XmlParsedDocument;
+			var doc = CU as MSBuildParsedDocument;
 			if (doc == null || doc.XDocument == null || (inferenceTask != null && !inferenceTask.IsCompleted))
 				return;
 

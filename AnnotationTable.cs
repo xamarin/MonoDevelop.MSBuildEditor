@@ -1,10 +1,10 @@
-﻿//
-// MSBuildDocumentParser.cs
+//
+// AnnotationTable.cs
 //
 // Author:
 //       mhutch <m.j.hutchinson@gmail.com>
 //
-// Copyright (c) 2015 Xamarin Inc.
+// Copyright (c) 2016 Xamarin Inc.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -25,46 +25,46 @@
 // THE SOFTWARE.
 
 using System;
-using System.Threading;
-using System.Threading.Tasks;
+using System.Linq;
+using System.Runtime.CompilerServices;
 
 using MonoDevelop.Ide.TypeSystem;
-using MonoDevelop.Xml.Parser;
+using MonoDevelop.Xml.Dom;
+using MonoDevelop.Xml.Editor;
 
 namespace MonoDevelop.MSBuildEditor
 {
-	class MSBuildDocumentParser : TypeSystemParser
+	class AnnotationTable<T,U> where T : class
 	{
-		public override Task<ParsedDocument> Parse (ParseOptions options, CancellationToken cancellationToken = default (CancellationToken))
+		ConditionalWeakTable<T, object[]> annotations = new ConditionalWeakTable<T, object[]> ();
+
+		public U Get (T o)
 		{
-			return Task.Run (() => ParseInternal (options, cancellationToken), cancellationToken);
+			object[] values;
+			if (!annotations.TryGetValue (o, out values))
+				return default (U);
+			return values.OfType<U> ().FirstOrDefault ();
 		}
 
-		ParsedDocument ParseInternal (ParseOptions options, CancellationToken cancellationToken)
+		public void Add (T o, U annotation)
 		{
-			var doc = new MSBuildParsedDocument (options.FileName);
-			doc.Flags |= ParsedDocumentFlags.NonSerializable;
+			if (Equals (annotation, default (T)))
+				return;
 
-			var xmlParser = new XmlParser (new XmlRootState (), true);
-			try {
-				xmlParser.Parse (options.Content.CreateReader ());
-			}
-			catch (Exception ex) {
-				Core.LoggingService.LogError ("Unhandled error parsing xml document", ex);
-			}
-
-			doc.XDocument = xmlParser.Nodes.GetRoot ();
-
-			doc.AddRange (xmlParser.Errors);
-
-			doc.Resolve ((MSBuildParsedDocument)options.OldParsedDocument);
-
-			if (doc.XDocument != null && doc.XDocument.RootElement != null) {
-				if (!doc.XDocument.RootElement.IsEnded)
-					doc.XDocument.RootElement.End (xmlParser.Location);
+			object[] values;
+			if (!annotations.TryGetValue (o, out values)) {
+				values = new object[1];
+			} else {
+				var idx = Array.FindIndex (values, obj => obj is T);
+				if (idx > -1) {
+					values [idx] = annotation;
+					return;
+				}
+				Array.Resize (ref values, values.Length + 1);
 			}
 
-			return doc;
+			values[values.Length - 1] = annotation;
 		}
 	}
+	
 }

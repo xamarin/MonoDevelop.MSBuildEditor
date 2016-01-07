@@ -40,13 +40,224 @@ using MonoDevelop.MSBuildEditor.ExpressionParser;
 
 namespace MonoDevelop.MSBuildEditor
 {
-	class MSBuildResolveContext
+	abstract class MSBuildVisitor
 	{
-		static readonly XName xnProject = new XName ("Project");
+		public void Run (XDocument doc)
+		{
+			foreach (var el in doc.RootElement.Elements) {
+				Traverse (el, null);
+			}
+		}
 
+		void Traverse (XElement el, MSBuildElement parent)
+		{
+			var resolved = MSBuildElement.Get (el.Name.FullName, parent);
+			if (resolved == null) {
+				VisitUnknown (el);
+				return;
+			}
+
+			VisitResolved (el, resolved);
+
+			switch (resolved.Kind) {
+			case MSBuildKind.Task:
+				VisitTask (el);
+				break;
+			case MSBuildKind.Import:
+				VisitImport (el);
+				break;
+			case MSBuildKind.Item:
+				VisitItem (el);
+				break;
+			}
+
+			foreach (var child in el.Elements) {
+				Traverse (child, resolved);
+			}
+		}
+
+		protected virtual void VisitResolved (XElement element, MSBuildElement kind)
+		{
+		}
+
+		protected virtual void VisitUnknown (XElement element)
+		{
+		}
+		
+		protected virtual void VisitTask (XElement element)
+		{
+		}
+
+		protected virtual void VisitItem (XElement element)
+		{
+		}
+
+		protected virtual void VisitProperty (XElement element)
+		{
+		}
+
+		protected virtual void VisitItemReference (XObject parent)
+		{
+		}
+
+		protected virtual void VisitPropertyReference (XObject parent)
+		{
+		}
+
+		protected virtual void VisitTaskReference (XObject parent)
+		{
+		}
+
+		protected virtual void VisitImport (XElement element)
+		{
+		}
+	}
+
+	class MSBuildReferenceCollector : MSBuildVisitor
+	{
 		readonly Dictionary<string,ItemInfo> items = new Dictionary<string,ItemInfo> (StringComparer.OrdinalIgnoreCase);
 		readonly Dictionary<string,TaskInfo> tasks = new Dictionary<string,TaskInfo> (StringComparer.OrdinalIgnoreCase);
 		readonly Dictionary<string,PropertyInfo> properties = new Dictionary<string,PropertyInfo> (StringComparer.OrdinalIgnoreCase);
+		readonly Dictionary<string,ParsedImport> imports = new Dictionary<string,ParsedImport> (StringComparer.OrdinalIgnoreCase);
+	}
+
+	class DocumentMSBuildVisitor : MSBuildReferenceCollector
+	{
+		AnnotationTable<XObject, object> annotations = new AnnotationTable<XObject, object> ();
+		MSBuildParsedDocument doc;
+
+		protected override void VisitUnknown (XElement element)
+		{
+			doc.Add (new Error (ErrorType.Error, $"Unknown element '{element.Name.FullName}'", element.Region));
+		}
+
+		protected override void VisitResolved (XElement element, MSBuildElement kind)
+		{
+			ValidateAttributes (element, kind);
+			annotations.Add (element, kind);
+		}
+
+		protected override void VisitTask (XElement element)
+		{
+		}
+
+		protected override void VisitImport (XElement element)
+		{
+		}
+
+		void ValidateAttributes (XElement el, MSBuildElement kind)
+		{
+			//TODO: check required attributes
+			//TODO: validate attribute expressions
+			foreach (var att in el.Attributes) {
+				var valid = resolved.Attributes.Any (a => att.Name.FullName == a);
+				if (!valid) {
+					doc.Add (new Error (ErrorType.Error, $"Unknown attribute '{att.Name.FullName}'", att.Region));
+				}
+			}
+		}
+	}
+
+	class MSBuildResolveContext
+	{
+		public XDocument XDocument { get; }
+		public string FileName { get; }
+
+		public MSBuildResolveContext (string fileName, XDocument doc)
+		{
+			XDocument = doc;
+		}
+
+		public void Load (MSBuildResolveContext previous)
+		{
+			
+		}
+
+		void Resolve (MSBuildResolveContext previous, XElement el, MSBuildElement parent)
+		{
+			var resolved = MSBuildElement.Get (el.Name.FullName, parent);
+			if (resolved == null) {
+				Add (new Error (ErrorType.Error, $"Unknown element '{el.Name.FullName}'", el.Region));
+				return;
+			}
+
+			annotations.Add (el, resolved);
+
+			foreach (var child in el.Elements) {
+				Resolve (previous, child, resolved);
+			}
+
+			switch (resolved.Kind) {
+			case MSBuildKind.Task:
+				//TODO: task validation
+				return;
+			case MSBuildKind.Import:
+				ResolveImport (previous, el, Path.GetDirectoryName (FileName));
+				break;
+			}
+
+			ValidateAttributes (el, resolved);
+		}
+
+		void ResolveImport (MSBuildParsedDocument previous, XElement el, string basePath = null)
+		{
+			var importAtt = el.Attributes [new XName ("Project")];
+			string import = importAtt?.Value;
+			if (string.IsNullOrWhiteSpace (import)) {
+				Add (new Error (ErrorType.Warning, "Empty value", importAtt.Region));
+				return;
+			}
+
+			//TODO: use property values when resolving imports
+			var importEvalCtx = MSBuildResolveContext.CreateImportEvalCtx (ToolsVersion);
+
+			string filename = importEvalCtx.Evaluate (import);
+
+			if (basePath != null) {
+				filename = Path.Combine (basePath, filename);
+			}
+
+			if (!Platform.IsWindows) {
+				filename = filename.Replace ('\\', '/');
+			}
+
+			var fi = new FileInfo (filename);
+
+			if (!fi.Exists) {
+				Add (new Error (ErrorType.Warning, "Could not resolve import", importAtt.Region));
+				return;
+			}
+
+			if (imports.ContainsKey (filename)) {
+				return;
+			}
+
+			//TODO: reparse this when any imports' mtimes change
+			ParsedImport parsedImport;
+			if (previous != null && previous.imports.TryGetValue (filename, out parsedImport) && parsedImport.TimeStampUtc <= fi.LastWriteTimeUtc) {
+				imports [filename] = parsedImport;
+				return;
+			}
+
+			var xmlParser = new XmlParser (new XmlRootState (), true);
+			try {
+				bool useBom;
+				System.Text.Encoding encoding;
+				string text = Core.Text.TextFileUtility.ReadAllText (filename, out useBom, out encoding);
+				xmlParser.Parse (new StringReader (text));
+			}
+			catch (Exception ex) {
+				LoggingService.LogError ("Unhandled error parsing xml document", ex);
+			}
+
+			imports [filename] = new ParsedImport (filename, xmlParser.RootState.CreateDocument (), fi.LastWriteTimeUtc);
+		}
+	}
+
+	/*
+		static readonly XName xnProject = new XName ("Project");
+
+		
 		readonly HashSet<string> imports = new HashSet<string> ();
 		public readonly DateTime TimeStampUtc = DateTime.UtcNow;
 		string ToolsVersion;
@@ -133,27 +344,11 @@ namespace MonoDevelop.MSBuildEditor
 			return arg [0] != '_';
 		}
 
-		static string GetToolsVersion (XDocument doc)
-		{
-			if (doc.RootElement != null) {
-				var att = doc.RootElement.Attributes [new XName ("ToolsVersion")];
-				if (att != null) {
-					var val = att.Value;
-					if (!string.IsNullOrEmpty (val))
-						return val;
-				}
-			}
-			return "2.0";
-		}
-
-		public static async Task<MSBuildResolveContext> Create (XmlParsedDocument doc, MSBuildResolveContext previous)
+		public static async Task<MSBuildResolveContext> Create (MSBuildParsedDocument doc, MSBuildResolveContext previous)
 		{
 			var ctx = new MSBuildResolveContext ();
 
-			ctx.ToolsVersion = GetToolsVersion(doc.XDocument);
-			if (string.IsNullOrEmpty (ctx.ToolsVersion)) {
-				ctx.ToolsVersion = "2.0";
-			}
+			ctx.ToolsVersion = doc.ToolsVersion;
 
 			if (previous != null && previous.ToolsVersion == ctx.ToolsVersion) {
 				ctx.importEvalCtx = previous.importEvalCtx;
@@ -214,6 +409,7 @@ namespace MonoDevelop.MSBuildEditor
 					FileName = filename,
 					Content = TextFileProvider.Instance.GetReadOnlyTextEditorData (filename)
 				};
+
 				var doc = (XmlParsedDocument)await TypeSystemService.ParseFile (parseOptions, "application/xml");
 				var ctx = new MSBuildResolveContext ();
 				if (doc.XDocument != null) {
@@ -401,7 +597,7 @@ namespace MonoDevelop.MSBuildEditor
 				ExtractReferences (mir.Instance);
 		}
 
-		static MSBuildEvaluationContext CreateImportEvalCtx (string toolsVersion)
+		public static MSBuildEvaluationContext CreateImportEvalCtx (string toolsVersion)
 		{
 			var ctx = new MSBuildEvaluationContext ();
 			var runtime = Runtime.SystemAssemblyService.CurrentRuntime;
@@ -412,7 +608,7 @@ namespace MonoDevelop.MSBuildEditor
 			return ctx;
 		}
 	}
-
+*/
 	class ItemInfo : BaseInfo
 	{
 		public Dictionary<string,MetadataInfo> Metadata { get; private set; }
@@ -479,6 +675,22 @@ namespace MonoDevelop.MSBuildEditor
 			: base (name, description)
 		{
 			Parameters = new HashSet<string> ();
+		}
+	}
+
+	class ParsedImport
+	{
+		public DateTime TimeStampUtc { get; }
+		string Filename { get; }
+		XDocument Doc { get; }
+		MSBuildResolveContext ResolveContext { get; }
+
+		public ParsedImport (string filename, XDocument doc, DateTime timeStampUtc)
+		{
+			Filename = filename;
+			Doc = doc;
+			TimeStampUtc = timeStampUtc;
+			ResolveContext = new MSBuildResolveContext ();
 		}
 	}
 }

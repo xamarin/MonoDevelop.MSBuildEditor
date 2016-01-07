@@ -61,6 +61,8 @@
     <Compile Include="Evaluation\Conditions\Token.cs" />
     <Compile Include="Builtins.cs" />
     <Compile Include="MSBuildDocumentParser.cs" />
+    <Compile Include="MSBuildParsedDocument.cs" />
+    <Compile Include="AnnotationTable.cs" />
   </ItemGroup>
   <ItemGroup>
     <EmbeddedResource Include="Properties\Manifest.addin.xml" />
