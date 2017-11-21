@@ -175,5 +175,28 @@ namespace MonoDevelop.MSBuildEditor.Schema
 				}
 			}
 		}
+
+		public static VariableInfo GetAttributeInfo (this IEnumerable<IMSBuildSchema> schemas,  MSBuildLanguageAttribute attribute, string elementName, string attributeName)
+		{
+			if (attribute.IsAbstract) {
+				switch (attribute.AbstractKind.Value) {
+				case MSBuildKind.TaskParameter:
+					return schemas.GetTaskParameter (elementName, attributeName);
+				case MSBuildKind.Metadata:
+					return schemas.GetMetadata (elementName, attributeName, false);
+				default:
+					throw new InvalidOperationException ($"Unsupported abstract attribute kind {attribute.AbstractKind}");
+				}
+			}
+
+			if (attribute.ValueKind == MSBuildValueKind.MatchItem) {
+				var item = schemas.GetItem (elementName);
+				return new MSBuildLanguageAttribute (
+					attribute.Name, attribute.Description, item.ValueKind, attribute.Required, attribute.AbstractKind
+				);
+			}
+
+			return attribute;
+		}
 	}
 }

@@ -2,20 +2,33 @@
 // Licensed under the MIT license. See LICENSE file in the project root for full license information.
 
 using MonoDevelop.Ide.Editor;
+using MonoDevelop.Ide.TypeSystem;
 using MonoDevelop.MSBuildEditor.Schema;
 using MonoDevelop.Xml.Dom;
+using MonoDevelop.MSBuildEditor.ExpressionParser;
+using System.Collections.Generic;
 
 namespace MonoDevelop.MSBuildEditor.Language
 {
-	class ValidatingDocumentResolver : MSBuildDocumentResolver
+	class MSBuildDocumentValidator : MSBuildVisitor
 	{
-		public ValidatingDocumentResolver (
-			MSBuildResolveContext ctx, string filename, bool isToplevel,
-			ITextDocument textDocument, MSBuildSdkResolver sdkResolver,
-			PropertyValueCollector propertyValues, ImportResolver resolveImport)
-			: base (ctx, filename, isToplevel, textDocument, sdkResolver, propertyValues, resolveImport)
+		readonly MSBuildResolveContext context;
+		readonly string filename;
+		readonly ITextDocument document;
+
+		public MSBuildDocumentValidator (MSBuildResolveContext context, string filename, ITextDocument document)
 		{
+			this.context = context;
+			this.filename = filename;
+			this.document = document;
 		}
+
+		protected void AddError (ErrorType errorType, string message, DocumentRegion region)
+			=> context.Errors.Add (new Error (errorType, message, region));
+
+		protected void AddError (string message, DocumentRegion region) => AddError (ErrorType.Error, message, region);
+
+		protected void AddWarning (string message, DocumentRegion region) => AddError (ErrorType.Warning, message, region);
 
 		protected override void VisitUnknownElement (XElement element)
 		{
@@ -31,6 +44,8 @@ namespace MonoDevelop.MSBuildEditor.Language
 
 		protected override void VisitResolvedElement (XElement element, MSBuildLanguageElement resolved)
 		{
+			base.VisitResolvedElement (element, resolved);
+
 			foreach (var rat in resolved.Attributes) {
 				if (rat.Required && !rat.IsAbstract) {
 					var xat = element.Attributes.Get (new XName (rat.Name), true);
@@ -42,7 +57,7 @@ namespace MonoDevelop.MSBuildEditor.Language
 
 			switch (resolved.Kind) {
 			case MSBuildKind.Project:
-				if (!Filename.EndsWith (".props", System.StringComparison.OrdinalIgnoreCase)) {
+				if (!filename.EndsWith (".props", System.StringComparison.OrdinalIgnoreCase)) {
 					ValidateProjectHasTarget (element);
 				}
 				break;
@@ -65,8 +80,6 @@ namespace MonoDevelop.MSBuildEditor.Language
 				ValidateItemAttributes (element);
 				break;
 			}
-
-			base.VisitResolvedElement (element, resolved);
 		}
 
 		void ValidateProjectHasTarget (XElement element)
@@ -212,15 +225,122 @@ namespace MonoDevelop.MSBuildEditor.Language
 
 		protected override void VisitResolvedAttribute (XElement element, XAttribute attribute, MSBuildLanguageElement resolvedElement, MSBuildLanguageAttribute resolvedAttribute)
 		{
+			base.VisitResolvedAttribute (element, attribute, resolvedElement, resolvedAttribute);
+
 			if (string.IsNullOrWhiteSpace (attribute.Value)) {
 				if (resolvedAttribute.Required) {
 					AddError ($"Required attribute has empty value", attribute.GetNameRegion ());
 				} else {
 					AddWarning ($"Attribute has empty value", attribute.GetNameRegion ());
 				}
+				return;
 			}
 
-			base.VisitResolvedAttribute (element, attribute, resolvedElement, resolvedAttribute);
+			var info = context.GetSchemas ().GetAttributeInfo (resolvedAttribute, element.Name.Name, attribute.Name.Name);
+
+			if (info.DefaultValue != null && string.Equals (info.DefaultValue, attribute.Value)) {
+				AddWarning ($"Attribute has default value", attribute.GetValueRegion (document));
+			}
+
+			var kind = MSBuildCompletionExtensions.InferValueKindIfUnknown (info);
+			bool allowExpressions = kind.AllowExpressions ();
+			bool allowLists = kind.AllowLists () || info.ValueSeparators?.Length > 0;
+			kind = kind.GetScalarType ();
+
+			//TODO: comma-separated lists
+			var expr = new Expression ();
+			expr.Parse (attribute.Value, ExpressionParser.ParseOptions.AllowItemsMetadataAndSplit);
+
+			for (int i = 0; i < expr.Collection.Count; i++) {
+				var val = expr.Collection [i];
+				if (val is InvalidExpressionError err) {
+					var startOffset = attribute.GetValueStartOffset (document) + err.Position;
+					this.AddError (
+						$"Invalid expression: {err.Message}",
+						new DocumentRegion (
+							document.OffsetToLocation (startOffset),
+							document.OffsetToLocation (startOffset + (attribute.Value.Length - err.Position))
+						)
+					);
+					return;
+				}
+				if (val is string s) {
+					if (s == ";") {
+						if (!allowLists) {
+							AddValueError ("Attribute does not allow lists");
+							return;
+						}
+						continue;
+					}
+					//it's a pure value if the items before & ahead of it are list boundaries or ';'
+					var isPureLiteralValue =
+						(i == 0 || (expr.Collection [i - 1] is string prev && prev == ";")) &&
+						(i + 1 == expr.Collection.Count || (expr.Collection [i + 1] is string next && next == ";"));
+						 
+					if (isPureLiteralValue) {
+						ValidateValue (attribute, s, kind, info.Values);
+						continue;
+					}
+				}
+				if (!allowExpressions) {
+					AddValueError ("Attribute does not allow expressions");
+				}
+
+				//items are implicitly lists
+				if (val is ItemReference ir) {
+					if (!allowLists) {
+						AddValueError ("Attribute does not allow lists");
+						return;
+					}
+				}
+
+				//TODO: can we validate properties, metadata, items in any meaningful way?
+			}
+
+			void AddValueError (string e) => this.AddError (e, attribute.GetValueRegion (document));
+		}
+
+		void ValidateValue (XAttribute attribute, string value, MSBuildValueKind kind, List<ConstantInfo> knownValues)
+		{
+			if (knownValues != null && knownValues.Count != 0) {
+				foreach (var kv in knownValues) {
+					if (string.Equals (kv.Name, value, System.StringComparison.OrdinalIgnoreCase)) {
+						return;
+					}
+				}
+				AddError ($"Unknown value '{value}'");
+				return;
+			}
+			switch (kind) {
+			case MSBuildValueKind.Guid:
+				if (!System.Guid.TryParseExact (value, "B", out _)) {
+					AddError ("Invalid GUID value");
+				}
+				break;
+			case MSBuildValueKind.Int:
+				if (!System.Int64.TryParse (value, out _)) {
+					AddError ("Invalid integer value");
+				}
+				break;
+			case MSBuildValueKind.Bool:
+				if (!System.Boolean.TryParse (value, out _)) {
+					AddError ("Invalid boolean value");
+				}
+				break;
+			case MSBuildValueKind.Url:
+				if (!System.Uri.TryCreate (value, System.UriKind.Absolute, out _)) {
+					AddError ("Invalid URL");
+				}
+				break;
+			case MSBuildValueKind.Version:
+				if (!System.Version.TryParse (value, out _)) {
+					AddError ("Invalid version");
+				}
+				break;
+				
+			}
+
+			void AddError (string e) => this.AddError (e, attribute.GetValueRegion (document));
 		}
 	}
 }

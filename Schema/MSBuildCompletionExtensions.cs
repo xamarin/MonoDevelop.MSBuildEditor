@@ -203,26 +203,7 @@ namespace MonoDevelop.MSBuildEditor.Schema
 			}
 
 			if (rr.AttributeName != null) {
-				var att = rr.LanguageElement.GetAttribute (rr.AttributeName);
-				if (att.IsAbstract) {
-					switch (att.AbstractKind.Value) {
-					case MSBuildKind.TaskParameter:
-						return schemas.GetTaskParameter (rr.ElementName, rr.AttributeName);
-					case MSBuildKind.Metadata:
-						return schemas.GetMetadata (rr.ElementName, rr.AttributeName, false);
-					default:
-						throw new InvalidOperationException ($"Unsupported abstract attribute kind {att.AbstractKind}");
-					}
-				}
-
-				if (att.ValueKind == MSBuildValueKind.MatchItem) {
-					var item = schemas.GetItem (rr.ElementName);
-					return new MSBuildLanguageAttribute (
-						att.Name, att.Description, item.ValueKind, att.Required, att.AbstractKind
-					);
-				}
-
-				return att;
+				return schemas.GetAttributeInfo (rr.LanguageAttribute, rr.ElementName, rr.AttributeName);
 			}
 
 			if (rr.LanguageElement.IsAbstract) {
@@ -251,7 +232,7 @@ namespace MonoDevelop.MSBuildEditor.Schema
 				return variable.ValueKind;
 			}
 
-			if (variable is PropertyInfo) {
+			if (variable is PropertyInfo || variable is MetadataInfo) {
 				if (StartsWith ("Enable")
 				    || StartsWith ("Disable")
 				    || StartsWith ("Require")

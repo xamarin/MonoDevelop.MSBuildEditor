@@ -95,7 +95,7 @@
     <Compile Include="Language\Annotations.cs" />
     <Compile Include="Language\AnnotationTable.cs" />
     <Compile Include="Language\Import.cs" />
-    <Compile Include="Language\ValidatingMSBuildDocumentResolver.cs" />
+    <Compile Include="Language\MSBuildDocumentValidator.cs" />
     <Compile Include="Language\MSBuildResolveContext.cs" />
     <Compile Include="Language\MSBuildResolveVisitor.cs" />
     <Compile Include="Language\PropertyValueCollector.cs" />
